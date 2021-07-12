@@ -1,0 +1,309 @@
+service: wdfn-accounts
+
+provider:
+  name: aws
+  stage: ${self:custom.branchTierMapping.${opt:branch}}
+  region: us-west-2
+  lambdaHashingVersion: 20201221
+  configValidationMode: error
+  variablesResolutionMode: 20210326
+  runtime: python3.8
+  logRetentionInDays: 90
+  deploymentBucket:
+    name: ${opt:bucket, iow-cloud-applications}
+  rolePermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/csr-Developer-Permissions-Boundary"
+  vpc: ${self:custom.vpc}
+  environment:
+    DEBUG: true
+  stackTags:
+    "wma:project_id": "iow"
+    "wma:subSystem": "IOW"
+    "wma:application_id": "WDFN Accounts Database"
+    "wma:environment": ${self:provider.stage}
+    "wma:taggingVersion": 0.0.1
+    "wma:costCenter": tbd
+    "wma:contact": jkreft@usgs.gov
+    "wma:organization": IOW
+    "wma:role": database
+    "wma:criticality": none
+    "wma:system": NWIS
+
+
+custom:
+  pythonRequirements:
+    dockerizePip: non-linux
+    usePipenv: false
+  prune:
+    automatic: true
+    number: 3
+  branchTierMapping:
+    main: TEST
+    test: TEST
+    qa: QA
+    prod: SHARED-RESTRICTED
+  branchTierShortMapping:
+    #main: DEV
+    main: TEST
+    test: TEST
+    qa: QA
+    prod: SHARED-RESTRICTED
+  wdfnAccountsSecrets: ${ssm:/aws/reference/secretsmanager/WDFN-ACCOUNTS-${self:provider.stage}~true}
+  vpc:
+    vpcId: ${self:custom.wdfnAccountsSecrets.VpcId}
+    securityGroupIds:
+      Fn::Split:
+        - ","
+        - ${self:custom.wdfnAccountsSecrets.SecurityGroupIds}
+    subnetIds:
+      Fn::Split:
+        - ","
+        - ${self:custom.wdfnAccountsSecrets.SubnetIds}
+
+
+
+resources:
+
+  Parameters:
+    ServiceName:
+      Type: String
+      Default: wdfnacctssvc-${self:provider.stage}
+      Description: A name for the wdfn accounts service
+    HttpContainerName:
+      Type: String
+      Default: wdfn-accounts-${self:provider.stage}
+      Description: The wdfn accounts server
+    ImageUrl:
+      Type: String
+      Default: wdfn-accounts:${env:IMAGE_SHA}
+      Description: The docker image for the wdfn accounts server
+    HttpContainerPort:
+      Type: Number
+      Default: 8080
+      Description: The port number for the wdfn accounts server
+    HttpContainerCpu:
+      Type: Number
+      Default: 256
+      Description: CPU for the wdfn accounts server
+    HttpContainerMemory:
+      Type: Number
+      Default: 512
+      Description: How much memory in megabytes to give the wdfn accounts server
+    Path:
+      Type: String
+      Default: "*"
+      Description: A path on the public load balancer that this service
+        should be connected to. Use * to send all load balancer
+        traffic to this service.
+    Priority:
+      Type: Number
+      Default: 1
+      Description: The priority for the routing rule added to the load balancer.
+        This only applies if your have multiple services which have been
+        assigned to different paths on the load balancer.
+    DesiredCount:
+      Type: Number
+      Default: 1
+      Description: How many copies of the service task to run
+    Role:
+      Type: String
+      Default: ""
+      Description: (Optional) An IAM role to give the service's containers if the code within needs to
+        access other AWS resources like S3 buckets, DynamoDB tables, etc
+
+
+  Resources:
+
+    wdfnAccountsSecurityGroup:
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Security group for wdfn account servers on ${self:provider.stage}
+        GroupName: wdfn-accounts-server-${self:provider.stage}
+        VpcId: ${self:custom.wdfnAccountsSecrets.VpcId}
+        SecurityGroupIngress:
+          - CidrIp: ${self:custom.wdfnAccountsSecrets.IngressCidr}
+            FromPort: -1
+            IpProtocol: -1
+        SecurityGroupEgress:
+          - CidrIp: ${self:custom.wdfnAccountsSecrets.EgressCidr}
+            FromPort: -1
+            IpProtocol: -1
+
+    HttpTaskDefinition:
+      Type: AWS::ECS::TaskDefinition
+      Properties:
+        Family: HttpTaskFamily
+        Cpu: 1024
+        Memory: 2048
+        NetworkMode: awsvpc
+        RequiresCompatibilities:
+          - FARGATE
+        ExecutionRoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/csr-EcsTask-Role'
+        TaskRoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/csr-EcsTask-Role'
+        ContainerDefinitions:
+          - Name: !Ref 'HttpContainerName'
+            Cpu: !Ref 'HttpContainerCpu'
+            Memory: !Ref 'HttpContainerMemory'
+            Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ImageUrl}'
+            Environment:
+              - Name: APP_DATABASE_NAME
+                Value: ${self:custom.wdfnAccountsSecrets.DATABASE_NAME}
+              - Name: APP_SCHEMA_NAME
+                Value: ${self:custom.wdfnAccountsSecrets.SCHEMA_NAME}
+              - Name: DATABASE_HOST
+                Value: ${self:custom.wdfnAccountsSecrets.DATABASE_HOST}
+              - Name: DATABASE_PORT
+                Value: 5432
+              - Name: APP_DB_OWNER_USERNAME
+                Value: ${self:custom.wdfnAccountsSecrets.DB_OWNER_USERNAME}
+              - Name: APP_DB_OWNER_PASSWORD
+                Value: ${self:custom.wdfnAccountsSecrets.DB_OWNER_PASSWORD}
+              - Name: SECRET_KEY
+                Value: ${self:custom.wdfnAccountsSecrets.SECRET_KEY}
+              - Name: DEBUG
+                Value: ${self:custom.wdfnAccountsSecrets.DEBUG}
+              - Name: SOCIAL_AUTH_REDIRECT_IS_HTTPS
+                Value: True
+              - Name: SOCIAL_AUTH_KEYCLOAK_KEY
+                Value: ${self:custom.wdfnAccountsSecrets.SOCIAL_AUTH_KEYCLOAK_KEY}
+              - Name: SOCIAL_AUTH_KEYCLOAK_SECRET
+                Value: ${self:custom.wdfnAccountsSecrets.SOCIAL_AUTH_KEYCLOAK_SECRET}
+              - Name: SOCIAL_AUTH_KEYCLOAK_PUBLIC_KEY
+                Value: ${self:custom.wdfnAccountsSecrets.SOCIAL_AUTH_KEYCLOAK_PUBLIC_KEY}
+              - Name: SOCIAL_AUTH_KEYCLOAK_AUTHORIZATION_URL
+                Value: ${self:custom.wdfnAccountsSecrets.SOCIAL_AUTH_KEYCLOAK_AUTHORIZATION_URL}
+              - Name: SOCIAL_AUTH_KEYCLOAK_ACCESS_TOKEN_URL
+                Value: ${self:custom.wdfnAccountsSecrets.SOCIAL_AUTH_KEYCLOAK_ACCESS_TOKEN_URL}
+            PortMappings:
+              - ContainerPort: !Ref HttpContainerPort
+            LogConfiguration:
+              LogDriver: awslogs
+              Options:
+                awslogs-group: !Ref FargateLogGroup
+                awslogs-region: !Sub '${AWS::Region}'
+                awslogs-stream-prefix: ecs
+
+
+
+    Route53RSGroup:
+      Type: AWS::Route53::RecordSetGroup
+      Properties:
+        Comment: "A Route53 RecordSet for WDFN Accounts Server"
+        HostedZoneId: Z832NFRVJE4PZ
+        RecordSets:
+          - Name: wdfn-accounts-${self:provider.stage}.wma.chs.usgs.gov
+            Type: CNAME
+            TTL: 900
+            ResourceRecords:
+              - ${self:custom.wdfnAccountsSecrets.LoadBalancer}
+
+    TargetG:
+      Type: AWS::ElasticLoadBalancingV2::TargetGroup
+      Properties:
+        HealthCheckIntervalSeconds: 60
+        HealthCheckPath: "/wdfn_accounts/"
+        HealthCheckTimeoutSeconds: 30
+        UnhealthyThresholdCount: 2
+        HealthyThresholdCount: 2
+        Name: !Join [ '', [ !Ref ServiceName, T] ]
+        Port: 10
+        Protocol: HTTP
+        TargetType: ip
+        VpcId: ${self:custom.wdfnAccountsSecrets.VpcId}
+
+    ListenerRuleGet:
+      Type: AWS::ElasticLoadBalancingV2::ListenerRule
+      Properties:
+        Actions:
+          - Type: forward
+            TargetGroupArn: !Ref TargetG
+        Conditions:
+          - Field: "path-pattern"
+            PathPatternConfig:
+              Values:
+                - "/wdfn_accounts/*"
+        Priority: 49982
+        ListenerArn:
+          ${self:custom.wdfnAccountsSecrets.ListenerArn}
+
+    ECSCluster:
+      Type: AWS::ECS::Cluster
+      Properties:
+        ClusterName: ecs-wdfn-accounts-cluster-${self:provider.stage}
+
+
+    # This is an IAM role which authorizes ECS to manage resources on your
+    # account on your behalf, such as updating your load balancer with the
+    # details of where your containers are, so that traffic can reach your
+    # containers.
+    ECSRole:
+      Type: AWS::IAM::Role
+      Properties:
+        PermissionsBoundary:
+          !Sub "arn:aws:iam::${AWS::AccountId}:policy/csr-Developer-Permissions-Boundary"
+        AssumeRolePolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: [ ecs.amazonaws.com ]
+              Action: [ 'sts:AssumeRole' ]
+        Path: /
+        Policies:
+          - PolicyName: ecs-service
+            PolicyDocument:
+              Statement:
+                - Effect: Allow
+                  Action:
+                    # Rules which allow ECS to attach network interfaces to instances
+                    # on your behalf in order for awsvpc networking mode to work right
+                    - 'ec2:AttachNetworkInterface'
+                    - 'ec2:CreateNetworkInterface'
+                    - 'ec2:CreateNetworkInterfacePermission'
+                    - 'ec2:DeleteNetworkInterface'
+                    - 'ec2:DeleteNetworkInterfacePermission'
+                    - 'ec2:Describe*'
+                    - 'ec2:DetachNetworkInterface'
+                  Resource: '*'
+
+    FargateLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: !Sub '/iow/fargate-${AWS::StackName}'
+
+    WdfnAccountsService:
+      Type: AWS::ECS::Service
+      DependsOn:
+        - ListenerRuleGet
+      Properties:
+        ServiceName: "WdfnAccountsService"
+        Cluster: !Ref 'ECSCluster'
+        LaunchType: FARGATE
+        DesiredCount: !Ref 'DesiredCount'
+        NetworkConfiguration:
+          AwsvpcConfiguration:
+            AssignPublicIp: DISABLED
+            SecurityGroups:
+              - Ref: wdfnAccountsSecurityGroup
+            Subnets:
+              Fn::Split:
+                - ","
+                - ${self:custom.wdfnAccountsSecrets.SubnetIds}
+        LoadBalancers:
+          - ContainerName: !Ref HttpContainerName
+            ContainerPort: !Ref HttpContainerPort
+            TargetGroupArn: !Ref TargetG
+        TaskDefinition: !Ref 'HttpTaskDefinition'
+
+package:
+  patterns:
+    - '!node_modules/**'
+    - '!package.json'
+    - '!package-lock.json'
+    - '!Dockerfile'
+    - '!.dockerfileignore'
+    - '!Jenkinsfile'
+
+
+plugins:
+  - serverless-prune-plugin
+  - serverless-plugin-git-variables
+  - serverless-dotenv-plugin
